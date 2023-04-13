@@ -1,0 +1,924 @@
+---
+title: "Spotify Regression Analysis"
+output: html_document
+date: "2023-03-21"
+---
+
+```{r load-packages}
+library(tidyverse)
+library(ggpointdensity)
+library(lmtest)
+library(olsrr)
+library(jtools)
+library(moments)
+library(plm)
+library(corrplot)
+library(nortest)
+library(Hmisc)
+library(caTools)
+library(MASS)
+library(truncreg)
+library(AER)
+library(stargazer)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+Variables: 
+id: Unique identifier for each track
+name: Name of the track
+popularity: Score that ranks how popular a track/artist is relative to other artists on Spotify  Range : [0, 100] 
+duration_ms: Duration of the track in milliseconds
+explicit: Indicates whether the track contains explicit content
+artists: Name(s) of the artist(s) who performed the track
+id_artists: Unique identifier for the artist(s) who performed the track
+release_date: Date when the track was released
+danceability: How suitable the track is for dancing based on a combination of musical elements such as tempo and rhythm - Range: [0.0, 1.0]  
+energy: Intensity and activity level of the track - Range: [0.0, 1.0]
+key: The musical key of the track
+loudness: Volume of the track, in decibels
+mode: Indicates the modality (major or minor) of the track
+speechiness: How many spoken words there are in the track - Range: [0.0, 1.0]
+acousticness: Confidence Measure of whether the track is acoustic - Range: [0.0, 1.0]
+instrumentalness: How instrumental the track is - Range: [0.0, 1.0]
+liveness: The presence of a live audience in the recording
+valence: How positive or happy the track sounds - Range: [0.0, 1.0]
+tempo: The tempo of the track, in beats per minute
+time_signature: The time signature of the track
+
+
+
+```{r read-data}
+df = read.csv('tracks_final.csv')
+head(df, 10)
+```
+
+```{r EDA}
+glimpse(df)
+```
+
+```{r EDA}
+summary(df)
+```
+
+We have 586,672 rows and 22 columns in our dataset.
+
+```{r checking-for-missing-values}
+colSums(is.na(df)) 
+```
+There are no missing values observed in the dataset.
+
+```{r corr-matrix}
+num_cols = unlist(lapply(df, is.numeric))
+res = cor(df[num_cols])
+
+corrplot(res, type = 'upper', order = 'hclust')
+```
+From the correlation matrix, we can see a correlation between track popularity and variables such as artist popularity, artist followers and release year.
+
+```{r univariate-histograms}
+num_df = df[num_cols]
+
+for (col in 1:ncol(num_df)) {
+  hist(num_df[, col], main = names(num_df[col]), xlab = names(num_df[col]), col = 'chocolate')
+}
+```
+
+
+```{r unique-track-genre}
+length(unique(df$track_genre))
+```
+
+Observations:
+a.) Track popularity appears to follow an approximately normal distribution albeit with a slight right skew.
+b.) There are significantly more songs with non-explicit content as compared to songs with explicit content.
+c.) `danceability` follows an approximately normal distribution centered around 0.6, albeit with a slight left skew.
+d.) Variables such as `speechiness`, `instrumentalness`, `acousticness` and  `liveness` are highly right-skewed. We may have to apply a log-transformation to these variables.
+e.) We have 113 unique track genres.
+
+
+```{r convert-factor}
+factor_cols = c('explicit', 'num_artists', 'key', 'mode', 'time_signature')
+df[factor_cols] = lapply(df[factor_cols], as.factor)
+
+glimpse(df)
+```
+To simplify our analysis, we can consider splitting the dataset into tracks released in 2005 and after, and tracks released before 2005. This splits the dataset into two groups with approximately equal number of samples.
+
+```{r}
+tracks_post2005 = df[df$release_year >= 2005, ] # tracks released in 1995 and beyond
+tracks_pre2005 = df[df$release_year < 2005, ] # tracks released before 1995
+
+dim(tracks_post2005)
+dim(tracks_pre2005)
+
+hist(tracks_post2005$popularity, main = 'Histogram of Popularity for Tracks released after 2005', xlab = 'Popularity', col = 'chocolate')
+qqnorm(tracks_post2005$popularity, main = 'Normal Q-Q Plot: Tracks released after 2005')
+qqline(tracks_post2005$popularity, col = 'blue', lwd = 2)
+
+hist(tracks_pre2005$popularity, main = 'Histogram of Popularity for Tracks released before 2005', xlab = 'Popularity', col = 'chocolate')
+qqnorm(tracks_pre2005$popularity, main = 'Normal Q-Q Plot: Tracks released before 2005')
+qqline(tracks_pre2005$popularity, col = 'blue', lwd = 2)
+
+```
+It seems that the popularity of tracks released after 2005 follow a normal distribution more closely than those released before 2005.
+From this point, we shall limit our exploratory data analysis to tracks released in 2005 and after, as this captures more recent tracks. The recency of tracks is key in this case as it serves to ensures our analysis is relevant to current times.
+
+```{r EDA}
+glimpse(tracks_post2005)
+```
+
+```{r corr-matrix-post1995}
+num_cols = unlist(lapply(tracks_post2005, is.numeric))
+res = cor(tracks_post2005[num_cols])
+
+corrplot(res, type = 'upper', order = 'hclust')
+```
+Noticeably, there is a strong negative correlation between acousticness and variables such as energy and loudness, which is expected as acoustic songs tend to be mild and less upbeat. 
+
+There appears to be a weak correlation between track popularity and factors such as loudness and danceability.
+
+Here, we will examine the relationship between release year and several other key factors such as popularity, danceability, energy and acousticness.
+
+```{r bivariate-analysis-release-year}
+
+ggplot(tracks_post2005, aes(x = factor(release_year), y = popularity, fill = factor(release_year))) + 
+  geom_boxplot() +
+  ggtitle('Box Plots of Popularity for Tracks released after 2005') +
+  labs(x = 'Release Year', y = 'Popularity', fill = 'Release Year') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(tracks_post2005, aes(x = factor(release_year), y = danceability, fill = factor(release_year))) + 
+  geom_boxplot() +
+  ggtitle('Box Plots of Danceability for Tracks released after 2005') +
+  labs(x = 'Release Year', y = 'Danceability', fill = 'Release Year') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(tracks_post2005, aes(x = factor(release_year), y = energy, fill = factor(release_year))) + 
+  geom_boxplot() +
+  ggtitle('Box Plots of Energy for Tracks released after 2005') +
+  labs(x = 'Release Year', y = 'Energy', fill = 'Release Year') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(tracks_post2005, aes(x = factor(release_year), y = acousticness, fill = factor(release_year))) + 
+  geom_boxplot() +
+  ggtitle('Box Plots of Acousticness for Tracks released after 2005') +
+  labs(x = 'Release Year', y = 'Acousticness', fill = 'Release Year') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(tracks_post2005, aes(x = factor(release_year), y = loudness, fill = factor(release_year))) + 
+  geom_boxplot() +
+  ggtitle('Box Plots of Loudness for Tracks released after 2005') +
+  labs(x = 'Release Year', y = 'Loudness', fill = 'Release Year') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+There appears to be a positive relationship between release year and variables such as popularity and danceability. The mean energy of tracks for each release year appear to have fall fallen over time. There is no observable relationship between loudness and release year, as well as acousticness and release year.
+
+Musical preferences inevitably change over time, and so do the songs produced; evidently, we should include release year as a control variable to control for fixed effects as much as possible.
+
+Next, we shall examine the relationship between popularity and variables such as danceability, energy, acousticness, instrumentalness and loudness.
+
+```{r bivariate-analysis-popularity-danceability}
+ggplot(tracks_post1995, aes(x = danceability, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Danceability') +
+  labs(x = 'Danceability', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = danceability, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Danceability') +
+  labs(x = 'Danceability', y = 'Popularity')
+```
+From the scatter plot generated, we can see that there appears to be an overall positive relationship between danceability and popularity, with the positive relationship being more pronounced in some years than others, for example in 2017 - 2021. It seems that musical preferences likely changed in this time period to favour songs with higher danceability. As evident from the scatter-density plot, a large number of tracks have a danceability that fall in the range of 0.50 to 0.75.
+
+```{r bivariate-analysis-popularity-energy}
+ggplot(tracks_post1995, aes(x = energy, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Energy') +
+  labs(x = 'Energy', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = energy, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Energy') +
+  labs(x = 'Energy', y = 'Popularity')
+```
+The relationship between popularity and energy in each year is less apparent here. In some years, there appears to be a negative relationship, especially in the recent years of 2017 and onwards, and a positive relationship in the older years, likely reflecting a shift in musical preferences. Interestingly, the negative relationship in recent years appear to be more pronounced than in the older years. Also, as evident from the scatter plot, there are a large number of tracks with an energy between 0.50 - 1.00, hovering around the popularity range of 25 - 50.
+
+```{r bivariate-analysis-popularity-acousticness}
+ggplot(tracks_post1995, aes(x = acousticness, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Acousticness') +
+  labs(x = 'Acousticness', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = acousticness, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Acousticness') +
+  labs(x = 'Acousticness', y = 'Popularity')
+```
+Overall, there appears to be a negative relationship between acousticness and popularity. From the scatter-density plot, it is evident that most tracks have a rather low acousticness.
+
+```{r bivariate-analysis-popularity-instrumentalness}
+ggplot(tracks_post1995, aes(x = instrumentalness, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Instrumentalness') +
+  labs(x = 'Instrumentalness', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = instrumentalness, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Instrumentalness') +
+  labs(x = 'Instrumentalness', y = 'Popularity')
+```
+It is difficult to glimpse the relationship between instrumentalness and popularity here as most tracks have an instrumentalness index of close to zero.
+
+```{r bivariate-analysis-popularity-loudness}
+ggplot(tracks_post1995, aes(x = loudness, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Loudness') +
+  labs(x = 'Loudness', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = loudness, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Loudness') +
+  labs(x = 'Loudness', y = 'Popularity')
+```
+In general, there appears to be a positive relationship between popularity and loudness. From the scatter-density plot, we can see that most tracks have a relative loudness between 120 and 0 dB and typically fall around the popularity range of 20 - 75.
+
+
+```{r bivariate-analysis-popularity-tempo}
+ggplot(tracks_post1995, aes(x = tempo, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Tempo') +
+  labs(x = 'Tempo', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = tempo, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Tempo') +
+  labs(x = 'Tempo', y = 'Popularity')
+```
+There seems to be a slight negative relationship between tempo and popularity. From the scatter-density plot, we can see that most tracks have a tempo that fall in the range of 75 - 175, and typically fall around the popularity range of 25 - 75.
+
+```{r bivariate-analysis-popularity-valence}
+ggplot(tracks_post1995, aes(x = valence, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Valence') +
+  labs(x = 'Valence', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = valence, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Valence') +
+  labs(x = 'Valence', y = 'Popularity')
+```
+In recent years, there appears to be a positive relationship between popularity and valence. From the scatter-density plot, it can be seen that valence is rather well-distributed and there are no clusters where samples are concentrated.
+
+```{r bivariate-analysis-popularity-artist_popularity}
+ggplot(tracks_post1995, aes(x = main_artist_popularity, y = popularity, color = factor(release_year))) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Artist Popularity') +
+  labs(x = 'Artist Popularity', y = 'Popularity', color = 'Release Year')
+  
+ggplot(tracks_post1995, aes(x = main_artist_popularity, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Artist Popularity') +
+  labs(x = 'Artist Popularity', y = 'Popularity')
+```
+There is a clear positive relationship between track popularity and artist popularity.This is expected as artists that are more well-known are likely to have more loyal listeners as well as public outreach, thus garnering greater track popularity for all tracks released.
+
+From our findings, we know that the relationship between popularity and the different audio features vary depending on the release year of the song, which is expected given changes in musical preferences, and therefore audio features to reflect that change.
+
+We ought to focus our regression analysis on songs released in 2017 and beyond, as they tend to exhibit similar properties with regards to their relationship with popularity, as evident from our bivariate analysis. Furthermore, this helps to ensure that our regression analysis would reflect current musical preferences, thereby producing results that are more relevant and are able to impact business outcomes positively. 
+
+
+```{r subsetting-df}
+# Limit analysis to songs released after 2017
+tracks_post2017 = tracks_post2005[tracks_post2005$release_year >= 2017, ]
+tracks_post2017 %>% head(10)
+```
+
+
+```{r EDA}
+glimpse(tracks_post2017)
+```
+
+
+```{r unique-track-genres}
+length(unique(tracks_post2017$track_genre))
+```
+We have 92 unique track genres.
+
+```{r histograms-features}
+num_cols = unlist(lapply(tracks_post2017, is.numeric))
+num_df = tracks_post2017[num_cols]
+
+for (col in 1:ncol(num_df)) {
+  hist(num_df[, col], main = names(num_df[col]), xlab = names(num_df[col]), col = 'chocolate')
+}
+```
+
+
+```{r histogram-popularity}
+ggplot(tracks_post2017, aes(x = popularity)) +
+  geom_histogram(bins = 20, color = 'white') +
+  labs(title = 'Histogram of Track Popularity for Tracks released in 2017 and after', x = 'Popularity', y = 'Frequency')
+```
+
+For our regression analysis, we have identified instrumentalness, danceability and duration_ms as variables of features to examine. We shall test if there is a causal relationship between these variables and track popularity.
+
+First, let us examine if there is a difference in variances and means between track genres.
+
+```{r examining-means}
+tracks_post2017 %>% group_by(track_genre) %>% summarise(count = n(), 
+                                                        mean_danceability = mean(danceability),
+                                                        mean_instrumentalness = mean(instrumentalness),
+                                                        mean_popularity = mean(popularity),
+                                                        mean_art_pop = mean(main_artist_popularity))
+```
+
+At first glance, it appears that many track genres are severely under-represented, for example chicago-house with only one track, compared to a genre such as dance with 86 tracks. There also appears to be a difference in mean danceability, instrumentalness, track popularity and artist popularity between genres.
+
+```{r homogeneity-of-variances-track-pop-between-genres}
+fligner.test(popularity ~ factor(track_genre), data = tracks_post2017)
+```
+
+We obtain a very small p-value from the Fligner-Killeen test, which allows us to reject the null hypothesis that the variances are equal. We can conclude at a 10% level of significance that the variances in popularity between track genres are not equal.
+
+```{r comparison-of-mean-trackpop-across-genre}
+one.way.pop = aov(popularity ~ factor(track_genre), data = tracks_post2017)
+
+summary(one.way.pop)
+```
+We obtain a very small p-value from the One-way ANOVA, so it appears that track genre does have a real impact on track popularity. At least one of the track genres have a statistically different mean track popularity from the other groups.
+
+```{r two-way-ANOVA-across-genre-and-release-year}
+two.way.pop.release_year = aov(popularity ~ factor(track_genre) + factor(release_year), data = tracks_post2017)
+
+summary(two.way.pop.release_year)
+```
+
+Likewise, we obtain a very small p-value for both track genre and release year as seen from the ANOVA table. These results would lead us to believe that changing track genres or release year will significantly impact track popularity.
+
+```{r corr-mat}
+res = cor(tracks_post2017[num_cols])
+
+corrplot(res, type = 'upper', order = 'hclust')
+```
+
+For our regression analysis, we shall first be testing whether there is a causal relationship between danceability and popularity.
+
+From the correlation matrix above, there appears to be a small positive correlation between popularity and danceability. There is also a small negative correlation between popularity and duration_ms, acousticness and instrumentalness. This may provide us with a hint as to which factors to control for in our regression analysis, alongside personal judgement.
+
+Next, we can look at the correlation between danceability and other audio features. For example, we can see that danceability is weakly correlated to almost all of the audio features. Some features that stand out would be loudness and valence.
+
+```{r}
+ggplot(tracks_post2017, aes(x = danceability)) +
+  geom_histogram(bins = 20, color = 'white') +
+  labs(title = 'Histogram of Track Danceability for Tracks released in 2017 and after', x = 'Danceability', y = 'Frequency')
+```
+There appears to be very tracks with a danceability of zero, which we shall examine.
+
+```{r examining-tracks-with-zero-danceability}
+tracks_post2017[tracks_post2017$danceability == 0, ]
+```
+It seems that tracks with a danceability of 0 are often white noise or ambiance/background music. Interestingly, many of them have really high popularity.
+
+```{r scatter-plot-of-danceability-and-popularity}
+ggplot(tracks_post2017, aes(x = danceability, y = popularity)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Danceability') +
+  labs(x = 'Danceability', y = 'Popularity', color = 'Release Year')
+
+ggplot(tracks_post2017, aes(x = danceability, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Danceability') +
+  labs(x = 'Danceability', y = 'Popularity')
+```
+
+From the above scatter plot, we can see that there is a positive linear relationship between popularity and danceability for tracks released in 2017 and onwards.
+
+We can also theorize that the effect of danceability on track popularity would vary between track genres. For example, the effect of an unit change in danceability on track popularity would theoretically be higher for a pop song as opposed to a orchestral song. 
+
+Hypothesis Formulation and Testing: Here, we want to examine if there is a relationship between track popularity and danceability
+
+Baseline Model Formulation:
+popularity = b0 + b1 * danceability + error
+
+H0: b1 is equal to 0
+H1: b1 is not equal to 0
+
+```{r base-model-danceability}
+base_model.lm_dance = lm(popularity ~ danceability, data = tracks_post2017) # Base Model: Regress popularity on danceability
+suppressWarnings(stargazer(base_model.lm_dance, type = 'text'))
+```
+
+```{r goldfeld-quandt-test-for-homoscedasticity}
+gqtest(base_model.lm_dance)
+```
+We obtain a very large p-value from the GQ test. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r residual-plot}
+ols_plot_resid_fit(base_model.lm_dance)
+```
+From the residual plot, it seems that the variance of the residuals remain approximately constant for different levels of fitted values, implying that homoscedasticity is satisfied, supporting our GQ test results.
+
+```{r autocorrelation-test}
+acf(base_model.lm_dance$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+
+dwtest(base_model.lm_dance)
+
+# Very small p-value obtained from the DW test, which provides us with sufficient evidence to reject the null hypothesis that autocorrelation is equal to zero. Therefore, we can conclude at a 1% level of significance that autocorrelation exists in the residuals generated.
+```
+
+From the baseline model, we can see that the coefficient on danceability is statistically significant at a 1% level of significance, implying that there is a significant positive relationship between danceability and track popularity. Furthermore, our simple linear regression model possess an R-squared value of 0.032, implying that the model with danceability as the only regressor is able to explain 3.2% of the variance in track popularity. However, the simple linear regression model suffers from OVB. Similarly, as we can see from the ACF plot, it suffers from significant autocorrelation. We ought to control for factors such as release year, the artist popularity as well as the genre.
+
+Firstly, we shall introduce artist as fixed effects while controlling for release year. This takes care of the difference in artist popularity between artists, which as we can see from the correlation matrix, has a large correlation with track popularity. Also, we account for changes in musical preference over time that may influence danceability and track popularity, as well as the fact that more recent tracks have a greater popularity as per the Spotify API algorithm.
+
+```{r danceability-with-fixed-effects-main-artist}
+fe.lm_dance = plm(popularity ~ danceability, index = 'main_artist_id', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_dance, type = 'text'))
+```
+After introducing main artist as fixed effects, the coefficient of danceability fell to 5.832 but still remains statistically significant at a 1% level of significance. Here, the within R-squared value falls to 0.011, implying that danceability alone is able to explain 1.1% of the variance in track popularity within artists. Next, let us control for release year.
+
+
+```{r danceability-with-fixed-effects-main-artist-controlling-for-release-year}
+fe.lm_dance_with_relyear = plm(popularity ~ danceability + factor(release_year), index = 'main_artist_id', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_dance_with_relyear, type = 'text'))
+```
+After accounting for release year and artist popularity, we can see that the coefficient of danceability falls from 13.149 to 4.309, implying that the initial value of the estimator for danceability was likely much higher than the true value; accounting for OVB in the form of release year and artist popularity reduced the coefficient significantly. Regardless, the coefficient is still statistically significant at a 1% level of significance. The fixed effects model is able to account for 10.5% of the variance in track popularity within artists.
+
+Now, let us introduce track genre as fixed effects while controlling for main artist popularity and release year.
+
+```{r danceability-fixed-effects-full-model}
+fe.lm_dance_full = plm(popularity ~ danceability + factor(release_year) + main_artist_popularity, index = 'track_genre', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_dance_full, type = 'text'))
+```
+```{r generate-table}
+##suppressWarnings(stargazer(fe.lm_dance_full, title = 'Danceability and Track Popularity', dep.var.caption = 'DV: Track Popularity',  covariate.labels = c('Danceability', 'Release Year: 2018', 'Release Year: 2019', 'Release Year: 2020', 'Release Year: 2021'), notes.label = 'Significance Levels', type = 'html', out = 'C:/Users/Admin/Desktop/Projects/Spotify/regression_results.htm'))
+```
+
+The coefficient of danceability obtained is 4.196, and is statistically significant at a 1% level of significance. As danceability falls from a scale of [0, 1], the interpretation for the coefficient changes here. Instead, we can interpret it as such: A 0.01 unit increase in the danceability index for a given track genre is associated with an increase in track popularity by 0.04196 on average for that track genre, holding all other predictors constant.
+
+Notably, the addition of main artist popularity improved our R-squared value significantly from 0.105 to 0.288, implying that the main artist popularity is actually a rather important factor in explaining track popularity. 
+
+In addition, we can introduce additional control variables as alternative specifications to our model. For example, we know that danceability is correlated to other audio features such as energy, tempo and loudness. According to the Spotify API documentation, danceability is based on a combination of musical elements including tempo, rhythm stability, beat strength, and overall regularity.
+
+```{r alternative-specifications-danceability}
+fe.lm_dance_alternative = plm(popularity ~ danceability + factor(release_year) + main_artist_popularity + energy + loudness + tempo, index = 'track_genre', model = 'within', data = tracks_post2017)
+
+suppressWarnings(stargazer(fe.lm_dance_alternative, type = 'text'))
+```
+
+The coefficient for danceability for the alternative model changes slightly from 4.196 in the initial model to 4.463, after introducing energy, loudness and tempo. It is also statistically significant at a 1% level of significance. However, it is of note that the coefficient for energy is statistically significant at a 1% level of significance, whereas the coefficients for loudness and tempo are not statistically significant. We can interpret our results as such: A 0.01 unit increase in the danceability index for a given track genre is associated with an increase in track popularity by 0.04463 on average for that track genre, holding all other predictors constant.
+
+Here, we can also make an argument that the effect on track popularity of danceability may vary depending on track genres. We can consider adding an interaction term between danceability and track genre, though we have to be wary about the fact that this will significantly inflate the number of regressors we have (an additional 181 variables)
+
+```{r alternative-specifications-interaction-term-between-danceability-and-track-genre}
+lm_dance_interaction = lm(popularity ~ danceability + factor(release_year) + main_artist_popularity + danceability * factor(track_genre), data = tracks_post2017)
+
+summary(lm_dance_interaction)
+```
+we should note that in certain genres, there are very few songs which may result in under-representation and a non-normal distribution, which may result in results that are not reliable. Regardless, let us examine our results; we can see that the coefficients for most of the interaction terms are not statistically significant at a 10% level of significance. However, there are a few coefficients that are actually statistically significant, for example k-pop, j-dance, hip-hop- happy and funk. This implies that for these few genres, there is actually a difference in the effect of a unit change in danceability for observations in which the track either falls under that genre (Di = 1) or do not fall under that genre (Di = 0)
+
+```{r danceability-alternative-specifications-no-interaction-term}
+lm_dance_no_interaction = lm(popularity ~ danceability + factor(release_year) + main_artist_popularity + factor(track_genre), data = tracks_post2017)
+
+summary(lm_dance_no_interaction)
+```
+
+Let us fall back to our initial model, and test the G-M assumptions for this particular model.
+
+```{r danceability-fixed-effects-full-model}
+fe.lm_dance_full = plm(popularity ~ danceability + factor(release_year) + main_artist_popularity, index = 'track_genre', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_dance_full, type = 'text'))
+
+lm_dance_full = lm(popularity ~ danceability + factor(release_year) + main_artist_popularity + factor(track_genre), data = tracks_post2017) # generate lm model for ease of use of imported functions for assumptions testing
+```
+
+
+```{r homoscedasticity-test}
+ols_plot_resid_fit(lm_dance_full)
+
+gqtest(lm_dance_full)
+```
+The variance of residuals appear to be constant for different levels of fitted values, implying that homoscedasticity is not violated. This is further supported by the GQ test conducted, for which we obtain a very large p-value. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r autocorrelation-test}
+acf(fe.lm_dance_full$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+```
+We can see that the problem of autocorrelation is mitigated significantly after the introduction of release year, main artist popularity and track genre (fixed effects). 
+
+```{r multicollinearity-test}
+ols_vif_tol(lm_dance_full)
+```
+The VIF obtained for all the coefficients are low, and do not exceed 5 or 10, the recommended guideline above which multicollinearity is an issue. Furthermore, the correlation matrix does not show significant correlation between the included regressors.
+
+Next, let us examine the relationship between track popularity and instrumentalness.
+
+```{r}
+ggplot(tracks_post2017, aes(x = instrumentalness)) +
+  geom_histogram(bins = 20, color = 'white') +
+  labs(title = 'Histogram of Track Instrumentalness for Tracks released in 2017 and after', x = 'Instrumentalness', y = 'Frequency')
+```
+
+```{r scatter-plot-of-instrumentalness-and-popularity}
+ggplot(tracks_post2017, aes(x = instrumentalness, y = popularity)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = lm, se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Instrumentalness') +
+  labs(x = 'Instrumentalness', y = 'Popularity', color = 'Release Year')
+
+ggplot(tracks_post2017, aes(x = instrumentalness, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Instrumentalness') +
+  labs(x = 'Instrumentalness', y = 'Popularity')
+```
+
+Baseline model formulation:
+popularity = b0 + b1 * instrumentalness + error
+
+H0: b1 is equal to 0
+H1: b1 is not equal to 0
+
+```{r base-model-instrumentalness}
+base_model.lm_instr = lm(popularity ~ instrumentalness, data = tracks_post2017) # Base Model: Regress popularity on instrumentalness
+suppressWarnings(stargazer(base_model.lm_instr, type = 'text'))
+```
+
+```{r goldfeld-quandt-test-for-homoscedasticity}
+gqtest(base_model.lm_instr)
+```
+We obtain a very large p-value from the GQ test. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r residual-plot}
+ols_plot_resid_fit(base_model.lm_instr)
+```
+From the residual plot, it seems that the variance of the residuals remain approximately constant for different levels of fitted values, implying that homoscedasticity is satisfied, supporting our GQ test results.
+
+```{r autocorrelation-test}
+acf(base_model.lm_instr$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+
+dwtest(base_model.lm_instr)
+
+# Very small p-value obtained from the DW test, which provides us with sufficient evidence to reject the null hypothesis that autocorrelation is equal to zero. Therefore, we can conclude at a 1% level of significance that autocorrelation exists in the residuals generated.
+```
+From the baseline model, we can see that the coefficient on instrumentalness is statistically significant at a 1% level of significance, implying that there is a significant negative relationship between instrumentalness and track popularity. Furthermore, our simple linear regression model possess an R-squared value of 0.003, implying that the model with instrumentalness as the only regressor is able to explain 0.3% of the variance in track popularity. However, the simple linear regression model suffers from OVB. Similarly, as we can see from the ACF plot, it suffers from significant autocorrelation. We ought to control for factors such as release year, the artist popularity as well as the genre.
+
+Firstly, we shall introduce artist as fixed effects while controlling for release year. This takes care of the difference in artist popularity between artists, which as we can see from the correlation matrix, has a large correlation with track popularity. Also, we account for changes in musical preference over time that may influence instrumentalness and track popularity, as well as the fact that more recent tracks have a greater popularity as per the Spotify API algorithm.
+
+```{r instrumentalness-with-fixed-effects-main-artist}
+fe.lm_instr = plm(popularity ~ instrumentalness, index = 'main_artist_id', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_instr, type = 'text'))
+```
+After introducing main artist as fixed effects, the coefficient of instrumentalness fell to -2.991 but still remains statistically significant at a 10% level of significance. Here, the within R-squared value falls to 0.002, implying that danceability alone is able to explain 0.2% of the variance in track popularity within artists. This is rather small, and implies that our model likely does not have much explanatory power. Next, let us control for release year.
+
+
+```{r instrumentalness-with-fixed-effects-main-artist-controlling-for-release-year}
+fe.lm_instr_with_relyear = plm(popularity ~ instrumentalness + factor(release_year), index = 'main_artist_id', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_instr_with_relyear, type = 'text'))
+```
+After accounting for release year and artist popularity, we can see that the coefficient of instrumentalness become -2.572; accounting for OVB in the form of release year and artist popularity reduced the coefficient significantly. In this case, the coefficient for instrumentalness is no longer statistically significant. The fixed effects model is able to account for 10.0% of the variance in track popularity within artists.
+
+Now, let us introduce track genre as fixed effects while controlling for main artist popularity and release year.
+
+```{r instrumentalness-fixed-effects-full-model}
+fe.lm_instr_full = plm(popularity ~ instrumentalness + factor(release_year) + main_artist_popularity, index = 'track_genre', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_instr_full, type = 'text'))
+```
+The coefficient of danceability obtained is 2.098, and is statistically significant at a 5% level of significance. Interestingly, after accounting for track genre, the coefficient of instrumentalness becomes positive. As instrumentalness falls from a scale of [0, 1], the interpretation for the coefficient changes here. Instead, we can interpret it as such: A 0.01 unit increase in the instrumentalness index for a given track genre is associated with an increase in track popularity by 0.02098 on average for that track genre, holding all other predictors constant.
+
+Notably, the addition of main artist popularity improved our R-squared value significantly from 0.100 to 0.285, implying that the main artist popularity is actually a rather important factor in explaining track popularity. 
+
+Here, we can also make an argument that the effect on track popularity of danceability may vary depending on track genres. We can consider adding an interaction term between danceability and track genre, though we have to be wary about the fact that this will significantly inflate the number of regressors we have (an additional 181 variables)
+
+```{r generate-table}
+##suppressWarnings(stargazer(fe.lm_instr_full, title = 'Instrumentalness and Track Popularity', dep.var.caption = 'DV: Track Popularity',  covariate.labels = c('Danceability', 'Release Year: 2018', 'Release Year: 2019', 'Release Year: 2020', 'Release Year: 2021'), notes.label = 'Significance Levels', type = 'html', out = 'C:/Users/Admin/Desktop/Projects/Spotify/regression_results.htm'))
+```
+
+```{r alternative-specifications-interaction-term-between-instrumentalness-and-track-genre}
+lm_instr_interaction = lm(popularity ~ instrumentalness + factor(release_year) + main_artist_popularity + instrumentalness * factor(track_genre), data = tracks_post2017)
+
+summary(lm_instr_interaction)
+```
+we should note that in certain genres, there are very few songs which may result in under-representation and a non-normal distribution, which may result in results that are not reliable. Regardless, let us examine our results; we can see that most of the coefficients for our interaction terms are not statistically significant, implying that there might not be a statistically significant difference in the effect of danceability on track popularity for a given track genre when the track genre = 1 and track genre = 0.
+
+Let us fall back to our initial model, and test the G-M assumptions for this particular model.
+
+```{r instrumentalness-fixed-effects-full-model}
+fe.lm_instr_full = plm(popularity ~ instrumentalness + factor(release_year) + main_artist_popularity, index = 'track_genre', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_instr_full, type = 'text'))
+
+lm_instr_full = lm(popularity ~ instrumentalness + factor(release_year) + main_artist_popularity + factor(track_genre), data = tracks_post2017) # generate lm model for ease of use of imported functions for assumptions testing
+```
+
+```{r homoscedasticity-test}
+ols_plot_resid_fit(lm_instr_full)
+
+gqtest(lm_instr_full)
+```
+The variance of residuals appear to be constant for different levels of fitted values, implying that homoscedasticity is not violated. This is further supported by the GQ test conducted, for which we obtain a very large p-value. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r autocorrelation-test}
+acf(fe.lm_instr_full$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+```
+We can see that the problem of autocorrelation is mitigated significantly after the introduction of release year, main artist popularity and track genre (fixed effects). 
+
+
+```{r multicollinearity-test}
+ols_vif_tol(lm_instr_full)
+```
+The VIF obtained for all the coefficients are low, and do not exceed 5 or 10, the recommended guideline above which multicollinearity is an issue. Furthermore, the correlation matrix does not show significant correlation between the included regressors.
+
+Let us consider combining the two models for instrumentalness and danceability by including both variables as a regressor.
+
+
+```{r combining-instrumentalness-and-danceability}
+audio_features.lm = lm(popularity ~ danceability + instrumentalness + energy + main_artist_popularity + factor(release_year) + factor(track_genre), data = tracks_post2017)
+
+summary(audio_features.lm)
+```
+
+We can see that the coefficients for danceability and instrumentalness are positive, while that of energy is negative. Both danceability and energy are statistically significant at a 1% level of significance, while instrumentalness is statistically significant at a 10% level of significance. We can see that the coefficient for instrumentalness is smaller than that of danceability, which might imply that danceability likely has a greater effect on track popularity than instrumentalness.
+
+```{r excluding-instrumentalness}
+audio_features.lm_withoutinstr = lm(popularity ~ danceability + energy + main_artist_popularity + factor(release_year) + factor(track_genre), data = tracks_post2017)
+
+summary(audio_features.lm_withoutinstr)
+```
+
+The exclusion of instrumentalness causes our adjusted R-squared to fall from 0.5583 to 0.558, a difference of 0.0003. This likely implies that instrumentalness does not influence the explanatory power of our model much.
+
+
+Next, we shall examine if there is a relationship between the duration of the track and the popularity of the track.
+
+```{r histogram-duration}
+ggplot(tracks_post2017, aes(x = duration_ms)) +
+  geom_histogram(bins = 20, color = 'white') +
+  labs(title = 'Histogram of Duration (ms) for Tracks released in 2017 and after', x = 'Duration in Milliseconds', y = 'Frequency')
+```
+```{r scatterplot-duration}
+ggplot(tracks_post2017, aes(x = duration_ms, y = popularity)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = 'lm', se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Duration (ms)') +
+  labs(x = 'Duration in Milliseconds', y = 'Popularity')
+
+ggplot(tracks_post2017, aes(x = duration_ms, y = popularity)) +
+  geom_pointdensity() +
+  scale_color_viridis_c() +
+  ggtitle('Scatter-Density Plot of Popularity and Duration (ms)') +
+  labs(x = 'Duration in Milliseconds', y = 'Popularity')
+```
+
+```{r correlation-between-duration-and-popularity}
+cor(tracks_post2017$duration_ms, tracks_post2017$popularity)
+```
+
+From the above, we can see that there is a negative linear relationship between artist popularity and track popularity. Furthermore, we obtain a Pearson Correlation Coefficient of -0.189.
+
+Baseline Model Formulation:
+popularity = b0 + b1 * duration_ms + error
+
+H0: b1 is equal to 0
+H1: b1 is not equal to 0
+
+```{r base-model-duration}
+base_model.lm_dur = lm(popularity ~ duration_ms, data = tracks_post2017) # Base Model: Regress popularity on duration_ms
+suppressWarnings(stargazer(base_model.lm_dur, type = 'text'))
+```
+
+```{r goldfeld-quandt-test-for-homoscedasticity}
+gqtest(base_model.lm_dur)
+```
+We obtain a very large p-value from the GQ test. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r residual-plot}
+ols_plot_resid_fit(base_model.lm_dur)
+```
+From the residual plot, it seems that the variance of the residuals remain approximately constant for different levels of fitted values, implying that homoscedasticity is satisfied, supporting our GQ test results.
+
+```{r autocorrelation-test}
+acf(base_model.lm_dur$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+
+dwtest(base_model.lm_dur)
+
+# Very small p-value obtained from the DW test, which provides us with sufficient evidence to reject the null hypothesis that autocorrelation is equal to zero. Therefore, we can conclude at a 1% level of significance that autocorrelation exists in the residuals generated.
+```
+
+From the baseline model, we can see that the coefficient on duration_ms is statistically significant at a 1% level of significance, implying that there is a significant negative relationship between track duration and track popularity. Furthermore, our simple linear regression model possess an R-squared value of 0.036, implying that the model with danceability as the only regressor is able to explain 3.6% of the variance in track popularity. However, the simple linear regression model suffers from OVB. Similarly, as we can see from the ACF plot, it suffers from significant autocorrelation. We ought to control for factors such as release year, the artist popularity as well as the genre.
+
+Firstly, we shall introduce artist as fixed effects while controlling for release year. This takes care of the difference in artist popularity between artists, which as we can see from the correlation matrix, has a large correlation with track popularity. Also, we account for changes in musical preference over time that may influence duration and track popularity, as well as the fact that more recent tracks have a greater popularity as per the Spotify API algorithm.
+
+```{r duration-with-fixed-effects-main-artist}
+fe.lm_dur = plm(popularity ~ duration_ms, index = 'main_artist_id', model = 'within', data = tracks_post2017)
+suppressWarnings(stargazer(fe.lm_dur, type = 'text'))
+
+summary(fe.lm_dur)
+```
+After introducing main artist as fixed effects, the coefficient of duration fell to -4.5204e-06 but still remains statistically significant at a 1% level of significance. Here, the within R-squared value falls to 0.001, implying that duration alone is able to explain 0.1% of the variance in track popularity within artists. Next, let us control for release year.
+
+
+```{r duration-with-fixed-effects-main-artist-controlling-for-release-year}
+fe.lm_dur_with_relyear = plm(popularity ~ duration_ms + factor(release_year), index = 'main_artist_id', model = 'within', data = tracks_post2017)
+summary(fe.lm_dur_with_relyear)
+```
+After accounting for release year and artist popularity, we can see that the coefficient of duration_ms becomes 2.0908e-06; accounting for OVB in the form of release year and artist popularity reduced the coefficient significantly. However, it is of note that duration_ms is no longer statistically significant at a 10% level of significance. The fixed effects model is able to account for 9.89% of the variance in track popularity within artists.
+
+Now, let us introduce track genre as fixed effects while controlling for main artist popularity and release year.
+
+```{r duration-fixed-effects-full-model}
+fe.lm_dur_full = plm(popularity ~ duration_ms + factor(release_year) + main_artist_popularity, index = 'track_genre', model = 'within', data = tracks_post2017)
+summary(fe.lm_dur_full)
+
+lm_dur_full = lm(popularity ~ duration_ms + factor(release_year) + main_artist_popularity + factor(track_genre), data = tracks_post2017) # generate lm model for ease of use of imported functions for assumptions testing
+```
+The coefficient of duration_ms obtained is -1.1661e-05, and is statistically significant at a 1% level of significance. As duration is in milliseconds, we can interpret it in terms of seconds by scaling the coefficient by a factor of 1000: A one second increase in track duration for a given track genre is associated with an fall in track popularity by 0.011661 on average for that track genre, holding all other predictors constant.
+
+The model is able to explain 28.8% of variance in track popularity within track genres, although duration alone does not influence track popularity much as compared to release year or artist popularity.
+
+```{r homoscedasticity-test}
+ols_plot_resid_fit(lm_dur_full)
+
+gqtest(lm_dur_full)
+```
+The variance of residuals appear to be constant for different levels of fitted values, implying that homoscedasticity is not violated. This is further supported by the GQ test conducted, for which we obtain a very large p-value. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r autocorrelation-test}
+acf(fe.lm_dur_full$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+```
+We can see that the problem of autocorrelation is mitigated significantly after the introduction of release year, main artist popularity and track genre (fixed effects). 
+
+```{r multicollinearity-test}
+ols_vif_tol(lm_dur_full)
+```
+The VIF obtained for all the coefficients are low, and do not exceed 5 or 10, the recommended guideline above which multicollinearity is an issue. Furthermore, the correlation matrix does not show significant correlation between the included regressors.
+
+
+Finally, we shall examine if there is a relationship between track popularity and artist popularity. From previous regression analysis, we have found that the R-squared values of our respective models increases significantly after the inclusion of artist popularity, which might hint at the fact that artist popularity is an important variable in explaining the variance in track popularity.
+
+```{r histogram-artist-popularity}
+ggplot(tracks_post2017, aes(x = main_artist_popularity)) +
+  geom_histogram(bins = 20, color = 'white') +
+  labs(title = 'Histogram of Artist Popularity for Tracks released in 2017 and after', x = 'Artist Popularity', y = 'Frequency')
+```
+
+```{r scatterplot-artist-popularity}
+ggplot(tracks_post2017, aes(x = main_artist_popularity, y = popularity)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = 'lm', se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Main Artist Popularity') +
+  labs(x = 'Main Artist Popularity', y = 'Popularity')
+
+ggplot(tracks_post2017, aes(x = main_artist_followers, y = popularity)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = 'lm', se = FALSE) +
+  ggtitle('Scatter Plot of Popularity and Main Artist Followers') +
+  labs(x = 'Main Artist Followers', y = 'Popularity')
+```
+
+```{r}
+plot(x = tracks_post2017$main_artist_popularity, tracks_post2017$popularity, xlab = 'Artist Popularity', ylab = 'Song Popularity', main = 'Scatter Plot of Popularity vs Artist Popularity with Regression Line')
+abline(lm(popularity ~ main_artist_popularity, data = tracks_post2017), col = 'red')
+```
+
+```{r}
+cor(x = tracks_post2017$main_artist_popularity, tracks_post2017$popularity, method = 'pearson')
+```
+From the above, we can see that there is a clear positive linear relationship between artist popularity and track popularity. Furthermore, we obtain a Pearson Correlation Coefficient of 0.572, which implies strong positive correlation.
+
+Baseline Model Formulation:
+popularity = b0 + b1 * artist popularity + error
+
+H0: b1 is equal to 0
+H1: b1 is not equal to 0
+
+
+```{r baseline-model}
+base_model.lm_pop = lm(popularity ~ main_artist_popularity, data = tracks_post2017)
+
+suppressWarnings(stargazer(base_model.lm_pop, type = 'text'))
+```
+
+```{r goldfeld-quandt-test-for-homoscedasticity}
+gqtest(base_model.lm_pop)
+# Goldfeld-Quandt Test:
+#H0: Heteroscedasticity is not present
+#H1: Heteroscedasticity is present.
+
+# Large p-value, fail to reject null hypothesis. Insufficient evidence to conclude that heteroscedasticity is present in the regression model.
+```
+We obtain a very large p-value from the GQ test. We do not have sufficient evidence to reject the null hypothesis that homoscedasticity is present.
+
+```{r residual-plot}
+ols_plot_resid_fit(base_model.lm_pop)
+```
+From the residual plot, it seems that the residuals appear to follow a fan-shape, and the variance of the residuals do not remain approximately constant for different levels of fitted values. This might likely hint at an issue with heteroscedasticity.
+
+```{r autocorrelation-test}
+acf(base_model.lm_pop$residuals, type = 'correlation', main = 'ACF Plot of Residuals')
+
+dwtest(base_model.lm_pop)
+
+# Very small p-value obtained from the DW test, which provides us with sufficient evidence to reject the null hypothesis that autocorrelation is equal to zero. Therefore, we can conclude at a 1% level of significance that autocorrelation exists in the residuals generated.
+```
+
+```{r normality-of-residuals}
+ols_plot_resid_hist(base_model.lm_pop)
+ols_plot_resid_qq(base_model.lm_pop)
+
+ols_plot_resid_box(base_model.lm_pop)
+```
+The residuals appear to be normally distributed, but there appears to be deviation at the two tails of the Q-Q lines.
+
+```{r}
+suppressWarnings(stargazer(base_model.lm_pop, type = 'text'))
+```
+From the baseline model, we can see that the coefficient on artist popularity is statistically significant at a 1% level of significance, implying that there is a significant positive relationship between artist popularity and track popularity. Furthermore, our simple linear regression model possess an R-squared value of 0.328, implying that the model with artist popularity as the only regressor is able to explain 32.8% of the variance in track popularity. However, the simple linear regression model suffers from OVB. Similarly, as we can see from the ACF plot, it suffers from autocorrelation. We ought to control for factors such as release year as well as the genre.
+
+```{r controlling-for-release-year}
+pop_lm = lm(popularity ~ main_artist_popularity + factor(release_year), data = tracks_post2017) # controlling for release year
+summary(pop_lm)
+```
+
+```{r autocorrelation}
+acf(pop_lm$residuals)
+```
+
+
+```{r with-fixed-effects}
+pop.lm_fe = plm(popularity ~ main_artist_popularity + factor(release_year), index = 'track_genre', model = 'within', data = tracks_post2017) # fixed effects regression with genre controlling for release year
+
+suppressWarnings(stargazer(base_model.lm_pop, pop_lm, pop.lm_fe, type = 'text'))
+```
+
+```{r}
+suppressWarnings(stargazer(base_model.lm_pop, pop.lm_fe, title = 'Track Popularity and Artist Popularity', dep.var.caption = 'DV: Track Popularity',  covariate.labels = c('Artist Popularity', 'Release Year: 2018', 'Release Year: 2019', 'Release Year: 2020', 'Release Year: 2021'), notes.label = 'Significance Levels', type = 'text'))
+```
+
+From the results obtained, we can see that the coefficient of artist popularity fell to 0.369 from 0.477 after controlling for release year and accounting for track genre as fixed effects. The coefficient is statistically significant at a 1% level of significance, implying that there is indeed a relationship between artist popularity and track popularity. We can therefore interpret the coefficient as such: A unit increase in artist popularity for a given genre is associated with a 0.369 increase in track popularity index on average for that genre, holding all other predictors constant. The fixed effects regression model is also able to explain 28.4% of the variance in track popularity within genres.
+
+```{r generate-table}
+##suppressWarnings(stargazer(pop.lm_fe, title = 'Track Popularity and Artist Popularity', dep.var.caption = 'DV: Track Popularity',  covariate.labels = c('Artist Popularity', 'Release Year: 2018', 'Release Year: 2019', 'Release Year: 2020', 'Release Year: 2021'), notes.label = 'Significance Levels', type = 'html', out = 'C:/Users/Admin/Desktop/Projects/Spotify/regression_results.htm'))
+```
+
+
+```{r full-model-multiple-reg}
+full_pop.lm = lm(popularity ~ main_artist_popularity + factor(release_year) + factor(track_genre), data = tracks_post2017)
+summary(full_pop.lm)
+```
+
+
+```{r homoskedasticity-test}
+ols_plot_resid_fit(full_pop.lm)
+```
+Residuals appear to be  homoscedastic. 
+
+
+```{r gq-test-for-homoscedasticity}
+gqtest(full_pop.lm, order.by = ~main_artist_popularity + factor(release_year) + factor(track_genre), data = tracks_post2017)
+
+# Goldfeld-Quandt Test:
+#H0: Heteroscedasticity is not present
+#H1: Heteroscedasticity is present.
+
+# Large p-value, fail to reject null hypothesis. Insufficient evidence to conclude that heteroscedasticity is present in the regression model.
+```
+
+```{r normality-of-residuals}
+ols_plot_resid_hist(full_pop.lm)
+ols_plot_resid_qq(full_pop.lm)
+
+ols_plot_resid_box(full_pop.lm)
+```
+The residuals appear to be normally distributed.
+
+```{r multicollinearity-test}
+ols_vif_tol(full_pop.lm)
+```
+Variance Inflation Factors are generally small and less than 5, indicating that multicollinearity is likely not present.
+
+```{r autocorrelation-test}
+dwtest(full_pop.lm) 
+# p-value obtained is very small, can reject null hypothesis. Autocorrelation is present.
+```
+
+```{r}
+par(mai =  c(1,1,1,1))
+acf(pop.lm_fe$residuals, type = 'correlation', main = "ACF Plot for Fixed Effects Regression (index = 'track genre')")
+```
+We can see that after introducing genre as fixed effects and controlling for release year, autocorrelation is significantly mitigated.
+

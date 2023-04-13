@@ -1,4 +1,4 @@
-# A Regression Analysis using features provided by the Spotify API to determine the most important factors that influence a track's popularity
+## A Regression Analysis using features provided by the Spotify API to determine the most important factors that influence a track's popularity
 
 The Spotify API allows us to view the various characteristics of each track streamed on Spotify, for example audio features such as danceability, tempo and energy, to non-audio features such as the duration of the track and whether the track contains explicit content. Finally, we have a popularity index for each track that ranges from 0 - 100, that is determined via a combination of factors, such as the total number of times the track has been streamed by users, added to users' playlists, saved to users' libraries, and also the number of times the track has been shared or listened to on social media and other platforms. 
 
